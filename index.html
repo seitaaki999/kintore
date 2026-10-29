@@ -40,7 +40,13 @@ h2 { font-size: 16px; margin: 0; }
 .num { font-variant-numeric: tabular-nums; }
 button { font: inherit; color: inherit; cursor: pointer; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
-input, select, textarea { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px; width: 100%; min-width: 0; }
+input, select, .ocr-item { border: 1px solid var(--line); border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+.ocr-item .top { display: flex; gap: 8px; align-items: center; }
+.ocr-item input[type=date] { flex: 1; }
+.ocr-item .sum { font-size: 13px; color: var(--muted); line-height: 1.5; }
+.ocr-item .flag { font-size: 12px; color: var(--warn); font-weight: 600; }
+.set input.chk { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, var(--bg)); }
+textarea { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px; width: 100%; min-width: 0; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 14px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -104,6 +110,15 @@ textarea { min-height: 120px; font-size: 12px; font-family: ui-monospace, Menlo,
 
   <!-- 記録 -->
   <section id="v-log" class="view" style="display:flex;flex-direction:column;gap:14px">
+    <div class="card" id="import-card">
+      <h2>筋トレMEMOの画像から取り込む</h2>
+      <p class="muted" style="margin:0">筋トレMEMOで保存した画像を選ぶと、日付・種目・重量・回数を読み取ります。何枚でもまとめて選べます。</p>
+      <label class="btn" for="shots" style="text-align:center">画像を選ぶ</label>
+      <input id="shots" type="file" accept="image/*" multiple style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">
+      <div class="muted" id="ocr-status" role="status"></div>
+      <div id="ocr-results" style="display:flex;flex-direction:column;gap:8px"></div>
+      <div class="row" id="ocr-actions" hidden><button class="btn" id="ocr-save" style="flex:1">まとめて保存</button><button class="btn ghost small" id="ocr-clear">やめる</button></div>
+    </div>
     <div class="card">
       <div class="row"><label for="date" class="muted" style="width:3em">日付</label><input id="date" type="date" style="flex:1"></div>
       <div class="muted" id="date-state"></div>
@@ -289,7 +304,7 @@ function renderDraft() {
     const sets = el('div', {className: 'sets'});
     ex.sets.forEach((s, si) => {
       const pl = el('div', {className: 'plates', textContent: BARBELL.has(ex.e) ? plates(s.w) : ''});
-      const w = el('input', {type: 'text', inputMode: 'decimal', value: s.w == null ? '' : s.w, placeholder: '自重', ariaLabel: `${si + 1}セット目の重量`, oninput: () => { const v = parseFloat(w.value); s.w = isNaN(v) ? null : v; pl.textContent = BARBELL.has(ex.e) ? plates(s.w) : ''; }});
+      const w = el('input', {type: 'text', inputMode: 'decimal', className: s.chk ? 'chk' : '', value: s.w == null ? '' : s.w, placeholder: '自重', ariaLabel: `${si + 1}セット目の重量`, oninput: () => { const v = parseFloat(w.value); s.w = isNaN(v) ? null : v; s.chk = false; w.classList.remove('chk'); pl.textContent = BARBELL.has(ex.e) ? plates(s.w) : ''; }});
       const r = el('input', {type: 'text', inputMode: 'numeric', value: s.r ?? '', ariaLabel: `${si + 1}セット目の回数`, oninput: () => { const v = parseInt(r.value, 10); s.r = isNaN(v) ? null : v; }});
       const del = el('button', {className: 'del', textContent: '×', ariaLabel: `${si + 1}セット目を消す`, onclick: () => { ex.sets.splice(si, 1); renderDraft(); }});
       sets.append(el('div', {className: 'set'}, el('span', {className: 'no', textContent: si + 1}), w, el('span', {className: 'x', textContent: '×'}), r, del), pl);
@@ -507,6 +522,119 @@ $('#reset-no').addEventListener('click', () => { $('#reset-confirm').hidden = tr
 $('#reset-yes').addEventListener('click', () => { db.sets = SEED.map(([d, e, s, w, r]) => ({d, e, s, w, r})); persist(); $('#reset-confirm').hidden = true; toast('初期データに戻しました'); refreshCommon(); renderData(); loadDate(); });
 let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { if (current === 'graph') renderGraph(); }, 150); });
 matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => { if (current === 'graph') renderGraph(); });
+
+// ---------- 画像の読み取り ----------
+// 筋トレMEMOのスクショ（OCR結果やiPhoneのテキスト認識）を記録に変換する
+function parseWorkoutText(raw, known) {
+  const text = raw.normalize('NFKC').replace(/[。_|]/g, ' ').replace(/[“”"']/g, '');
+  const lines = text.split(/\n/).map((l) => l.trim()).filter(Boolean);
+  let date = null; const out = []; let cur = null;
+  const fixNum = (s) => s.replace(/[Zz]/g, '7').replace(/[Oo]/g, '0').replace(/[lI]/g, '1').replace(/,/g, '.');
+  const lev = (a, b) => { const d = Array.from({length: a.length + 1}, (_, i) => [i]); for (let j = 1; j <= b.length; j++) d[0][j] = j; for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); return d[a.length][b.length]; };
+  const matchName = (n) => { let best = null, bs = 0; for (const k of known) { const s = 1 - lev(n, k) / Math.max(n.length, k.length); if (s > bs) { bs = s; best = k; } } return bs >= 0.6 ? best : n; };
+  for (const line0 of lines) {
+    const line = line0.replace(/\s+/g, ' ');
+    const dm = line.match(/(20\d{2})\s*[\/\-.]\s*(\d{1,2})\s*[\/\-.]\s*(\d{1,2})/);
+    if (dm && !date) { date = `${dm[1]}-${dm[2].padStart(2, '0')}-${dm[3].padStart(2, '0')}`; continue; }
+    const sm = line.match(/^(\d{1,2})\s*(-|[\d.,OoZz]+)\s*(?:kg)?\s*[x×X]\s*(\d+)\s*re?p/i);
+    if (sm && cur) {
+      const wRaw = fixNum(sm[2]); const r = parseInt(sm[3], 10);
+      let w = null, chk = false;
+      if (wRaw !== '-') {
+        const base = parseFloat(wRaw); const cands = [base]; if (!wRaw.includes('.') && base >= 100) cands.push(base / 10);
+        const om = line.match(/1?RM\s*[:：]\s*([\d.OoZz,]+)/);
+        let orm = om ? fixNum(om[1]) : null;
+        if (orm) {
+          const ov = parseFloat(orm); const ormC = orm.includes('.') ? [ov] : [ov, ov / 10, ov / 100];
+          let bestE = Infinity;
+          for (const c of cands) for (const o of ormC) { const e = Math.abs(c * (1 + r / 40) - o) / o; if (e < bestE) { bestE = e; w = c; } }
+          if (bestE > 0.03) { chk = true; if (base > 300 && cands[1]) w = cands[1]; }
+        } else { w = base > 300 && cands[1] ? cands[1] : base; chk = cands.length > 1; }
+        w = Math.round(w * 100) / 100;
+      }
+      cur.sets.push({w, r, chk});
+      continue;
+    }
+    if (/Powerd|MEMO|WorkOut|^MAX/i.test(line)) continue;
+    const jp = line.match(/[぀-ヿ一-鿿（）()ー・]+/g);
+    if (jp && /[゠-ヿ一-鿿]/.test(line) && !/^\d/.test(line)) {
+      let name = line.split(/R\s*M/)[0].replace(/\s+/g, '').replace(/[^぀-ヿ一-鿿A-Za-z()（）・ー]/g, '');
+      name = name.replace(/\(/g, '（').replace(/\)/g, '）');
+      if (name.length < 2) continue;
+      if (/距離|時間|速さ|カロリー|メモ/.test(name)) { cur = null; continue; }
+      cur = {e: matchName(name, known), raw: name, sets: []}; out.push(cur);
+    }
+  }
+  return {date, exercises: out.filter((x) => x.sets.length)};
+}
+
+let ocrWorker = null, ocrQueue = [];
+const loadScript = (src) => new Promise((ok, ng) => { const sc = el('script', {src}); sc.onload = ok; sc.onerror = () => ng(new Error('読み取り機能を読み込めませんでした。ネットにつながっているか確認してください')); document.head.append(sc); });
+async function getWorker() {
+  if (ocrWorker) return ocrWorker;
+  if (!window.Tesseract) await loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js');
+  ocrWorker = await Tesseract.createWorker('jpn', 1, {langPath: 'https://cdn.jsdelivr.net/npm/@tesseract.js-data/jpn@1.0.0/4.0.0', logger: (m) => { if (m.status && m.status.includes('load')) $('#ocr-status').textContent = '読み取りの準備中…（初回だけ少し時間がかかります）'; }});
+  return ocrWorker;
+}
+const fileToCanvas = (file) => new Promise((ok, ng) => { const url = URL.createObjectURL(file); const img = new Image(); img.onload = () => { const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight; c.getContext('2d').drawImage(img, 0, 0); URL.revokeObjectURL(url); ok(c); }; img.onerror = () => ng(new Error('画像を開けませんでした')); img.src = url; });
+function headerCanvas(c) {
+  const h = Math.round(c.width * 0.085); const o = document.createElement('canvas'); o.width = c.width; o.height = h;
+  const x = o.getContext('2d'); x.drawImage(c, 0, 0, c.width, h, 0, 0, c.width, h);
+  const d = x.getImageData(0, 0, o.width, h); const p = d.data;
+  for (let i = 0; i < p.length; i += 4) { const g = 255 - (p[i] * .3 + p[i + 1] * .59 + p[i + 2] * .11); const v = g < 110 ? 0 : 255; p[i] = p[i + 1] = p[i + 2] = v; }
+  x.putImageData(d, 0, 0); return o;
+}
+const knownNames = () => [...new Set([...exNames(), ...Object.values(TEMPLATES).flat().map((t) => t[0])])];
+async function readShots(files) {
+  $('#ocr-status').textContent = '読み取りの準備中…';
+  let worker; try { worker = await getWorker(); } catch (e) { $('#ocr-status').textContent = e.message; return; }
+  let i = 0;
+  for (const f of files) {
+    i++; $('#ocr-status').textContent = `読み取り中… ${i} / ${files.length}枚`;
+    try {
+      const c = await fileToCanvas(f);
+      const {data} = await worker.recognize(c);
+      const res = parseWorkoutText(data.text, knownNames());
+      let dateFlag = '';
+      if (!res.date) { const h = await worker.recognize(headerCanvas(c)); const m = h.data.text.normalize('NFKC').replace(/\s/g, '').match(/(20\d{2})[\/.\-](\d{1,2})[\/.\-](\d{1,2})/); if (m) res.date = `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`; }
+      if (!res.date) { const d = new Date(f.lastModified || Date.now()); res.date = new Date(d.getTime() - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10); dateFlag = '日付が読めなかったので、画像の保存日にしています'; }
+      if (!res.exercises.length) { ocrQueue.push({date: res.date, exercises: [], flag: '記録を読み取れませんでした。筋トレMEMOの共有画像か確認してください', name: f.name}); continue; }
+      const same = ocrQueue.find((q) => q.date === res.date && q.exercises.length);
+      if (same) same.exercises.push(...res.exercises); else ocrQueue.push({date: res.date, exercises: res.exercises, flag: dateFlag});
+    } catch (e) { ocrQueue.push({date: today(), exercises: [], flag: e.message || '読み取りに失敗しました', name: f.name}); }
+  }
+  $('#ocr-status').textContent = '読み取り結果を確認して「まとめて保存」を押してください。';
+  renderOcr();
+}
+function renderOcr() {
+  const box = $('#ocr-results'); box.replaceChildren();
+  ocrQueue.sort((a, b) => a.date < b.date ? -1 : 1).forEach((q, qi) => {
+    const item = el('div', {className: 'ocr-item'});
+    const dt = el('input', {type: 'date', value: q.date, ariaLabel: '日付', onchange: () => { q.date = dt.value; }});
+    const fix = el('button', {className: 'btn small ghost', textContent: '確認・修正', onclick: () => { $('#date').value = q.date; draft = q.exercises.map((x) => ({e: x.e, sets: x.sets.map((s) => ({...s}))})); ocrQueue.splice(qi, 1); renderOcr(); renderDraft(); $('#date-state').textContent = '画像から読み取った内容です。確認して保存してください'; document.getElementById('exercises').scrollIntoView({behavior: 'smooth'}); }});
+    const del = el('button', {className: 'del', textContent: '×', ariaLabel: 'この日を取り込まない', onclick: () => { ocrQueue.splice(qi, 1); renderOcr(); }});
+    item.append(el('div', {className: 'top'}, dt, fix, del));
+    if (q.exercises.length) item.append(el('div', {className: 'sum num', textContent: q.exercises.map((x) => `${x.e} ` + x.sets.map((s) => (s.w == null ? '自重' : fmt(s.w)) + '×' + s.r + (s.chk ? '?' : '')).join('、')).join(' ／ ')}));
+    const warn = q.exercises.some((x) => x.sets.some((s) => s.chk)) ? '「?」の付いた数字は読み取りが怪しいので、確認・修正で見てください' : '';
+    const existed = db.sets.some((s) => s.d === q.date) ? 'この日の記録はすでにあるので、上書きされます' : '';
+    [q.flag, warn, existed].filter(Boolean).forEach((t) => item.append(el('div', {className: 'flag', textContent: t})));
+    box.append(item);
+  });
+  $('#ocr-actions').hidden = !ocrQueue.some((q) => q.exercises.length);
+  document.querySelectorAll('.savebar').forEach((b) => { b.hidden = ocrQueue.length > 0; });
+  if (!ocrQueue.length) $('#ocr-status').textContent = '';
+}
+$('#shots').addEventListener('change', (e) => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) readShots(fs); });
+$('#ocr-clear').addEventListener('click', () => { ocrQueue = []; renderOcr(); });
+$('#ocr-save').addEventListener('click', () => {
+  const before = prSet(); const ds = [];
+  for (const q of ocrQueue) { if (!q.exercises.length) continue; const rows = []; q.exercises.forEach((x) => { let n = 0; x.sets.forEach((s) => { if (s.r > 0) rows.push({d: q.date, e: x.e, s: ++n, w: s.w, r: s.r}); }); }); db.sets = db.sets.filter((s) => s.d !== q.date).concat(rows); ds.push(q.date); }
+  persist();
+  const prs = [...prSet()].filter((k) => !before.has(k) && ds.includes(k.split('|')[0])).map((k) => k.split('|')[1]);
+  ocrQueue = []; renderOcr(); refreshCommon(); loadDate();
+  toast(`${ds.length}日分を保存しました` + (prs.length ? `。自己ベスト更新：${[...new Set(prs)].join('、')}` : ''));
+  show('graph');
+});
 
 renderTemplates(); refreshCommon(); loadDate();
 if ('serviceWorker' in navigator && location.protocol === 'https:' && !location.hostname.endsWith('claude.ai') && !location.hostname.includes('claudeusercontent')) { navigator.serviceWorker.register('sw.js').catch(() => {}); }
